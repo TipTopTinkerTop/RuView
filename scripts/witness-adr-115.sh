@@ -71,6 +71,28 @@ else
   echo "[witness] SKIP benchmarks (set RUVIEW_RUN_BENCH=1 to include — ~3 min)"
   echo "Skipped — set RUVIEW_RUN_BENCH=1 to include." > "${BUNDLE_DIR}/bench-results/criterion-stdout.log"
 fi
+# Always include the benchmark reference doc with previously-captured numbers.
+cp docs/integrations/benchmarks.md "${BUNDLE_DIR}/bench-results/" 2>/dev/null || true
+
+# ── 5b. ESP32 ↔ MQTT validation report (optional, needs hardware) ────
+if [[ "${RUVIEW_RUN_ESP32:-0}" == "1" ]]; then
+  echo "[witness] running ESP32 validation (needs hardware on the configured port)"
+  bash scripts/validate-esp32-mqtt.sh \
+      --duration 60 \
+      --broker 127.0.0.1:11883 \
+      --report "${BUNDLE_DIR}/esp32-validation.md" \
+      2>&1 | tee "${BUNDLE_DIR}/esp32-validation-stdout.log" || true
+else
+  echo "[witness] SKIP ESP32 validation (set RUVIEW_RUN_ESP32=1 with hardware attached)"
+  cat > "${BUNDLE_DIR}/esp32-validation.md" <<EOF
+ESP32 ↔ MQTT validation was not run for this witness bundle.
+
+To include it, set RUVIEW_RUN_ESP32=1 and re-run the witness generator
+with a provisioned ESP32-S3 on COM7 (Windows) or /dev/ttyUSB0 (Linux).
+The harness in \`scripts/validate-esp32-mqtt.sh\` will write a real
+validation report into this slot.
+EOF
+fi
 
 # ── 6. Source manifest with SHA-256 of every ADR-115 file ────────────
 echo "[witness] computing source SHA-256 manifest"
