@@ -378,6 +378,12 @@ struct NodeState {
     latest_sync: Option<wifi_densepose_hardware::SyncPacket>,
     /// Last time a sync packet from this node was received (for staleness).
     latest_sync_at: Option<std::time::Instant>,
+    /// ADR-110 iter 18: EMA-tracked CSI frame rate for this node.
+    /// Replaces the hardcoded 20 Hz fallback in
+    /// `mesh_aligned_us_for_csi_frame` once `csi_fps_samples ≥ 5`.
+    csi_fps_ema: f64,
+    /// Number of inter-frame deltas observed (need ≥5 before trusting EMA).
+    csi_fps_samples: u32,
     /// Latest extracted features for cross-node fusion.
     latest_features: Option<FeatureInfo>,
     // ── RuVector Phase 2: Temporal smoothing & coherence gating ──
@@ -418,6 +424,59 @@ const NOVELTY_HISTORY_CAPACITY: usize = 64;
 /// subcarrier ordering / normalisation so banks reject stale data.
 const NOVELTY_SKETCH_VERSION: u16 = 1;
 
+/// ADR-110 iter 18 — EMA update for per-node CSI fps tracking.
+///
+/// Returns the new EMA value, or `None` if the delta is implausible
+/// (≤ 0, or > 1 second — likely a connection gap, not a real frame
+/// rate sample). α = 1/8 fixed shift, ~8-sample effective window,
+/// matching the firmware-side ESP-NOW offset smoother in §A0.10.
+///
+/// Free function for testability — every transformation that doesn't
+/// touch the rest of `NodeState` lives outside the `impl` block.
+pub(crate) fn update_csi_fps_ema(prev_fps: f64, dt_sec: f64) -> Option<f64> {
+    if !(dt_sec > 0.0 && dt_sec < 1.0) {
+        return None;
+    }
+    let instantaneous = 1.0 / dt_sec;
+    // y[n] = y[n-1] + (x - y[n-1]) / 8
+    Some(prev_fps + (instantaneous - prev_fps) / 8.0)
+}
+
+#[cfg(test)]
+mod fps_ema_tests {
+    use super::update_csi_fps_ema;
+
+    #[test]
+    fn steady_10hz_converges_toward_10() {
+        let mut fps = 20.0;
+        for _ in 0..40 {
+            fps = update_csi_fps_ema(fps, 0.100).unwrap();
+        }
+        assert!((fps - 10.0).abs() < 0.1,
+                "expected ~10 Hz after 40 samples at 100 ms intervals, got {fps}");
+    }
+
+    #[test]
+    fn steady_20hz_stays_near_20() {
+        let mut fps = 20.0;
+        for _ in 0..20 {
+            fps = update_csi_fps_ema(fps, 0.050).unwrap();
+        }
+        assert!((fps - 20.0).abs() < 0.05, "expected ~20 Hz, got {fps}");
+    }
+
+    #[test]
+    fn nonpositive_dt_rejected() {
+        assert!(update_csi_fps_ema(15.0, 0.0).is_none());
+        assert!(update_csi_fps_ema(15.0, -0.1).is_none());
+    }
+
+    #[test]
+    fn long_gap_rejected_as_implausible() {
+        assert!(update_csi_fps_ema(20.0, 2.0).is_none());
+    }
+}
+
 impl NodeState {
     /// ADR-110 §A0.12 timestamp recovery: given a CSI frame's node-local
     /// `esp_timer_get_time()` snapshot, return the mesh-aligned epoch
@@ -449,8 +508,28 @@ impl NodeState {
         if seen_at.elapsed() > std::time::Duration::from_secs(9) {
             return None;
         }
-        const CSI_FPS_HZ: f64 = 20.0;
-        Some(sync.mesh_aligned_us_for_sequence(frame_sequence, CSI_FPS_HZ))
+        // Iter 18: use the measured per-node fps once we have ≥5 inter-frame
+        // samples; until then fall back to the 20 Hz firmware ceiling. The
+        // §A0.12 capture showed real bench fps ≈ 10, so the measured value
+        // is significantly more accurate than the constant fallback.
+        let fps = if self.csi_fps_samples >= 5 { self.csi_fps_ema } else { 20.0 };
+        Some(sync.mesh_aligned_us_for_sequence(frame_sequence, fps))
+    }
+
+    /// ADR-110 iter 18 — update the per-node observed-fps EMA from a fresh
+    /// CSI frame arrival. Call once per accepted CSI frame from
+    /// `udp_receiver_task`. Uses `last_frame_time` as the previous-frame
+    /// anchor; the first frame after init seeds the timer without producing
+    /// a sample (no prior dt to measure).
+    pub(crate) fn observe_csi_frame_arrival(&mut self, now: std::time::Instant) {
+        if let Some(prev) = self.last_frame_time {
+            let dt = now.duration_since(prev).as_secs_f64();
+            if let Some(new_ema) = update_csi_fps_ema(self.csi_fps_ema, dt) {
+                self.csi_fps_ema = new_ema;
+                self.csi_fps_samples = self.csi_fps_samples.saturating_add(1);
+            }
+        }
+        self.last_frame_time = Some(now);
     }
 
     pub(crate) fn new() -> Self {
@@ -477,6 +556,8 @@ impl NodeState {
             edge_vitals: None,
             latest_sync: None,
             latest_sync_at: None,
+            csi_fps_ema: 20.0,
+            csi_fps_samples: 0,
             latest_features: None,
             prev_keypoints: None,
             motion_energy_history: VecDeque::with_capacity(COHERENCE_WINDOW),
