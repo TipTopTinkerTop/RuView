@@ -16,6 +16,14 @@ This witness separates what was **empirically observed on real silicon today** f
 
 ---
 
+## A0. v0.6.7 firmware build (this turn — 2026-05-23)
+
+| # | Claim | Evidence |
+|---|---|---|
+| **A0.1** | `firmware/esp32-csi-node` v0.6.7 builds clean for both targets on IDF v5.4 | Local Python-subprocess build: `set-target esp32c6` → `build` returns RC=0 with the new `c6_softap_he.c` and LP-core integration in `main/CMakeLists.txt`. C6 image 0xfe7f0 (≈1019 KB), 45 % partition slack. `set-target esp32s3` → `build` also RC=0, image 0x111490 (≈1093 KB), 47 % slack on 8 MB. SHA-256 sums recorded in `dist/firmware-v0.6.7/SHA256SUMS.txt`. |
+| **A0.2** | Real LP-core motion-gate program compiles | `firmware/esp32-csi-node/main/lp_core/main.c` (75 lines, RISC-V LP-core) authored; `ulp_embed_binary(ulp_main, lp_core/main.c, c6_lp_core.c)` wired in `main/CMakeLists.txt` guarded by `CONFIG_C6_LP_CORE_ENABLE`. Default still `n` so the v0.6.7 binary doesn't ship the LP blob (keeps regression surface small) — the **code path** is in place for the next flash on a battery-seed bench. |
+| **A0.3** | Soft-AP HE/TWT helper compiles | `c6_softap_he.{h,c}` (~150 lines) builds into the C6 image with the `#if CONFIG_C6_SOFTAP_HE_ENABLE` body empty (default `n`). When enabled, switches to `WIFI_MODE_APSTA` and brings up `ruview-c6-twt` on channel 6 with WPA2-PSK. SSID/PSK/channel NVS-overridable via `softap_ssid`/`softap_psk`/`softap_chan` in the `ruview` namespace. |
+
 ## A. Empirically verified (real silicon, today)
 
 | # | Claim | Evidence |

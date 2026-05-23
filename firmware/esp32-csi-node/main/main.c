@@ -37,6 +37,7 @@
 #include "c6_timesync.h"           /* ADR-110: 802.15.4 mesh time-sync (no-op on S3) */
 #include "c6_lp_core.h"            /* ADR-110: LP-core hibernation (no-op on S3) */
 #include "c6_sync_espnow.h"        /* ADR-110 D1 workaround: ESP-NOW sync */
+#include "c6_softap_he.h"          /* ADR-110 B1/B2: HE/TWT soft-AP (no-op when disabled) */
 #ifdef CONFIG_CSI_MOCK_ENABLED
 #include "mock_csi.h"
 #endif
@@ -116,6 +117,17 @@ static void wifi_init_sta(void)
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+
+#if defined(CONFIG_IDF_TARGET_ESP32C6) && defined(CONFIG_C6_SOFTAP_HE_ENABLE)
+    /* ADR-110 B1/B2 cheap-unblock: bring up a soft-AP that advertises HE +
+     * TWT Responder=1 so a second C6 board can negotiate iTWT against
+     * this node. c6_softap_he_start() switches the mode to AP+STA. */
+    uint8_t softap_chan = 0;
+    if (c6_softap_he_start(&softap_chan) == ESP_OK) {
+        ESP_LOGI(TAG, "C6 soft-AP HE armed on channel %u (ADR-110 B1/B2)", softap_chan);
+    }
+#endif
+
     ESP_ERROR_CHECK(esp_wifi_start());
 
     ESP_LOGI(TAG, "WiFi STA initialized, connecting to SSID: %s", g_nvs_config.wifi_ssid);

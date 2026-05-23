@@ -15,6 +15,8 @@ set(SRCS
     "c6_lp_core.c"
     # ADR-110 D1 workaround — ESP-NOW cross-node sync (works on S3+C6)
     "c6_sync_espnow.c"
+    # ADR-110 B1/B2 unblock — soft-AP HE/TWT (C6-only when enabled)
+    "c6_softap_he.c"
 )
 
 # ESP-IDF v6+: headers must resolve via explicit REQUIRES (no implicit deps).
@@ -65,3 +67,15 @@ idf_component_register(
     INCLUDE_DIRS "."
     REQUIRES ${REQUIRES}
 )
+
+# ADR-110 P5 (full): embed the LP-core motion-gate program when enabled.
+# `ulp_embed_binary` compiles lp_core/main.c with the RISC-V LP toolchain
+# and links the resulting binary into the HP image, exposing shared symbols
+# via the auto-generated `ulp_main.h` header.
+if(IDF_TARGET STREQUAL "esp32c6" AND CONFIG_C6_LP_CORE_ENABLE)
+    set(ulp_app_name ulp_main)
+    set(ulp_sources "lp_core/main.c")
+    # Source files in the HP component that include the generated ulp_main.h
+    set(ulp_exp_dep_srcs "c6_lp_core.c")
+    ulp_embed_binary(${ulp_app_name} "${ulp_sources}" "${ulp_exp_dep_srcs}")
+endif()

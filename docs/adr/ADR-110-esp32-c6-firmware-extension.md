@@ -130,10 +130,11 @@ In both cases the HP-side API stays the same: `c6_lp_core_arm()` configures the 
 | **P2** | HE-LTF CSI tagging in `csi_collector.c` | pending |
 | **P3** | TWT setup helper | pending |
 | **P4** | 802.15.4 init + skeleton time-sync | pending |
-| **P5** | LP-core hibernation stub | pending |
+| **P5** | LP-core hibernation stub | ✅ **done** (v0.6.6); upgraded to real LP-core polling program in v0.6.7 (`firmware/esp32-csi-node/main/lp_core/main.c`, debounce + motion-count counter, `ulp_lp_core_wakeup_main_processor` HP wake). Ext1 fallback kept as the `CONFIG_C6_LP_CORE_ENABLE=n` branch. Datasheet ≤5 µA pending INA measurement. |
 | **P6** | Build, flash COM6, capture boot telemetry, S3 regression check | ✅ **done** — `c6_ts: init done channel=15 leader=yes(candidate)`, HE MAC firmware loaded, 1003 KB binary (46% slack) |
 | **P7** | Benchmark C6 vs S3 (CSI fps, RAM, TWT jitter, power) | ✅ **done** — boot 353 ms, ts init 413 ms, image 1003 KB (−9 % vs S3), 310 KiB free heap, CSI callbacks fire at 64 subcarriers/frame on ch 1 background traffic |
 | **P8** | Witness bundle update, CLAUDE.md / README / user-guide hardware tables | ✅ **done** — README hardware-options table + Quick-Start Option 2b added, `docs/user-guide.md` now has full ESP32-C6 section (build, flash, provision, multi-room time-sync, battery seed mode) |
+| **P9** | **Software-only unblocks for B1/B2/B4 (firmware v0.6.7)** | ✅ **done** — (1) Real LP-core motion-gate program loads via `ulp_embed_binary(lp_core/main.c)`, exposes shared `motion_count`/`poll_count` symbols for witness verification (B4 code path complete, hardware-measurement still pending INA). (2) Soft-AP HE module (`c6_softap_he.{h,c}`) runs the C6 in AP+STA mode with WPA2 + HE advertised so a second C6 STA can negotiate real iTWT against a known-cooperative AP (B1/B2 unblocker without buying an 11ax router). (3) Build artifacts: S3 8 MB 1093 KB / C6 4 MB 1019 KB, both green on IDF v5.4. Both new modules default-off so v0.6.6 fleets see no behavior change. |
 
 This ADR is updated at the end of each phase with the actual outcome, links to commits, and any deviations from the design.
 

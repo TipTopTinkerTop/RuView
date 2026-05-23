@@ -48,11 +48,27 @@ void c6_lp_core_hibernate_and_wait(void);
  */
 bool c6_lp_core_was_motion_wake(void);
 
+/**
+ * Monotonic counter of wake-triggering motion events observed by the
+ * LP-core program since the last cold boot. Returns 0 when
+ * CONFIG_C6_LP_CORE_ENABLE is unset (fallback path).
+ */
+uint32_t c6_lp_core_motion_count(void);
+
+/**
+ * Total LP-timer poll iterations executed by the LP-core program.
+ * Useful as a sanity check that the LP-core is actually running;
+ * returns 0 on the fallback path.
+ */
+uint32_t c6_lp_core_poll_count(void);
+
 #else
 
 static inline esp_err_t c6_lp_core_arm(int g, bool h) { (void)g; (void)h; return ESP_OK; }
 static inline void      c6_lp_core_hibernate_and_wait(void) { }
 static inline bool      c6_lp_core_was_motion_wake(void) { return false; }
+static inline uint32_t  c6_lp_core_motion_count(void) { return 0; }
+static inline uint32_t  c6_lp_core_poll_count(void)   { return 0; }
 
 #endif
 
