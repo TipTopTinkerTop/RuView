@@ -143,19 +143,25 @@ esp_err_t c6_softap_he_start(uint8_t *out_channel)
         return err;
     }
 
-    /* On IDF v5.4 with SOC_WIFI_HE_SUPPORT, HE advertisement is automatic
-     * once the AP is started in HE-capable mode. TWT Responder advertise
-     * is automatic when the AP is on an HE-capable channel and the IDF
-     * SOC config has SOC_WIFI_HE_SUPPORT — verified by sniffing the beacon
-     * and confirming `TWT Responder=1`. If a future IDF exposes
-     * `esp_wifi_ap_set_he_config()` or similar, hook it here.
+    /* IDF v5.4 LIMIT (verified empirically 2026-05-23 — WITNESS-LOG-110 §A0.6):
+     * the public API exposes ONLY STA-side iTWT/bTWT (esp_wifi_sta_itwt_*,
+     * esp_wifi_sta_btwt_*). There is NO esp_wifi_ap_set_he_config(), NO
+     * wifi_he_ap_config_t, and NO wifi_config_t.ap.he_* field. A second C6
+     * associating against this soft-AP currently lands at phymode 11bgn
+     * (he:0, vht:0, ht:1) — the AP doesn't advertise HE because there's no
+     * way to ask it to. A future IDF release that exposes AP-side HE config
+     * (or a patched WiFi blob) is required to make this AP iTWT-capable.
      *
-     * Empirically against IDF v5.4 / C6 silicon: the beacon advertises
-     * HE capability when the band is 2.4 GHz and the AP is on an
-     * 11ax-capable channel, and TWT Responder follows. */
+     * Until then, this module still gives you a working WPA2 soft-AP on a
+     * controlled channel for AP+STA bench experiments and ESP-NOW peer
+     * discovery — just not iTWT validation. The c6_twt module on the STA
+     * side will return ESP_ERR_INVALID_ARG against this AP (no TWT Responder
+     * in the beacon), exactly as it does against any other 11n-only AP. */
     ESP_LOGI(TAG, "soft-AP starting: ssid=\"%s\" channel=%u auth=%s",
              ssid, s_channel,
              ap_cfg.ap.authmode == WIFI_AUTH_OPEN ? "open" : "wpa2-psk");
+    ESP_LOGW(TAG, "IDF v5.4 soft-AP does NOT advertise HE — STAs will associate at 11bgn. "
+                  "iTWT validation requires an external 11ax AP. See WITNESS-LOG-110 §A0.6.");
 
     /* Don't call esp_wifi_start() here — main.c brings the WiFi up once
      * for both AP and STA. We just configured the AP iface so it joins
