@@ -296,14 +296,21 @@ static void wifi_csi_callback(void *ctx, wifi_csi_info_t *info)
                          (int8_t)info->rx_ctrl.rssi, info->rx_ctrl.channel);
     }
 
-    /* ADR-110 §A0.11 — Emit a sync-packet every SYNC_EVERY_N CSI frames so the
+    /* ADR-110 §A0.11/§A0.12 — Emit a sync-packet every N CSI frames so the
      * host aggregator can pair node-local sequence numbers with the mesh-aligned
      * epoch coming out of c6_sync_espnow_get_epoch_us(). Backwards-compatible
      * with the ADR-018 frame format: new packet uses a distinct magic so the
-     * existing CSI parser can dispatch by first 4 bytes. */
+     * existing CSI parser can dispatch by first 4 bytes.
+     *
+     * Cadence is operator-tunable via CONFIG_C6_SYNC_EVERY_N_FRAMES (default 20).
+     * At 10 Hz observed CSI rate that's ~2 s between sync packets; raise to 50
+     * for ~5 s (less overhead, slower convergence), lower to 5 for ~0.5 s
+     * (heavier wire, tighter ADR-029/030 multistatic alignment window). */
     {
-        #define SYNC_EVERY_N_FRAMES  20    /* ~1 Hz at the 20 Hz send-rate gate */
-        if ((s_cb_count % SYNC_EVERY_N_FRAMES) == 0) {
+#ifndef CONFIG_C6_SYNC_EVERY_N_FRAMES
+#define CONFIG_C6_SYNC_EVERY_N_FRAMES 20
+#endif
+        if ((s_cb_count % CONFIG_C6_SYNC_EVERY_N_FRAMES) == 0) {
             uint8_t sync[32];
             uint32_t sync_magic = 0xC511A110u;    /* CSI-ADR-110 sync packet */
             uint64_t local_us = (uint64_t)esp_timer_get_time();

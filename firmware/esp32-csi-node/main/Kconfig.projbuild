@@ -402,6 +402,20 @@ menu "ESP32-C6 capabilities (ADR-110)"
         range 1 13
         depends on C6_SOFTAP_HE_ENABLE
 
+    config C6_SYNC_EVERY_N_FRAMES
+        int "Sync-packet emission cadence (CSI frames per sync)"
+        default 20
+        range 1 1000
+        help
+            How many CSI callbacks fire before csi_collector emits one
+            ADR-110 §A0.11 sync packet (magic 0xC511A110) carrying the
+            mesh-aligned epoch + sequence high-water for the host
+            aggregator to pair against incoming CSI frames.
+
+            Default 20 = ~2 s between sync packets at the bench's
+            observed 10 fps CSI rate. Raise for less wire overhead;
+            lower for tighter multistatic alignment windows.
+
 endmenu
 
 menu "ADR-018 frame extensions (ADR-110)"
