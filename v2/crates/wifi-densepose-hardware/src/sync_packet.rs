@@ -383,6 +383,39 @@ mod tests {
         assert_eq!(mesh, pkt.epoch_us + 50_000);  // 1 frame at 20 fps = 50 ms
     }
 
+    /// End-to-end ADR-110 pipeline sanity:
+    ///   (1) firmware emits sync packet (bytes built here as a stand-in)
+    ///   (2) host wire-decodes via from_bytes
+    ///   (3) a CSI frame arrives 100 sequences later (≈ 5 s @ 20 fps)
+    ///   (4) mesh_aligned_us_for_sequence recovers its mesh timestamp
+    /// Asserts that the recovered mesh time matches sync.epoch_us + Δus exactly,
+    /// and cross-checks against apply_to_local. This is the contract every
+    /// downstream multistatic-fusion consumer relies on.
+    #[test]
+    fn end_to_end_sync_decode_then_frame_mesh_recovery() {
+        let pkt = SyncPacket {
+            node_id: 9,
+            proto_ver: 1,
+            flags: SyncPacketFlags { is_leader: false, is_valid: true, smoothed_used: true },
+            local_us: 28_798_450,
+            epoch_us: 27_634_885,
+            sequence: 20,
+        };
+        let wire = pkt.to_bytes();
+        assert_eq!(wire.len(), SYNC_PACKET_SIZE);
+        let decoded = SyncPacket::from_bytes(&wire).unwrap();
+        assert_eq!(decoded, pkt);
+
+        // 5 s after sync at 20 fps = 100 frames later
+        let frame_seq = pkt.sequence + 100;
+        let mesh_us = decoded.mesh_aligned_us_for_sequence(frame_seq, 20.0);
+        assert_eq!(mesh_us, pkt.epoch_us + 5_000_000);
+
+        // Same mesh time via direct apply_to_local — both paths must agree
+        let local_at_frame = pkt.local_us + 5_000_000;
+        assert_eq!(decoded.apply_to_local(local_at_frame), mesh_us);
+    }
+
     #[test]
     fn wire_size_constant_is_correct() {
         let pkt = SyncPacket {
