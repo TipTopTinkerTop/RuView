@@ -86,7 +86,11 @@ static void send_beacon(void)
     frame[0] = 0x41;            /* FCF lo: data frame, no security, no ack */
     frame[1] = 0x88;            /* FCF hi: short addrs, intra-PAN */
     frame[2] = 0x00;            /* seq number — placeholder */
-    frame[3] = 0xFF; frame[4] = 0xFF;  /* dst PAN broadcast */
+    /* Empirically (rx#0 over 60s on all 3 boards), the IDF v5.4 receiver
+     * was rejecting the dst-PAN-broadcast (0xFFFF) frames even in
+     * promiscuous mode. Match our configured PAN ID 0xCAFE here — short
+     * dst stays 0xFFFF for intra-PAN broadcast. PAN bytes are LE. */
+    frame[3] = 0xFE; frame[4] = 0xCA;  /* dst PAN = 0xCAFE (matches local) */
     frame[5] = 0xFF; frame[6] = 0xFF;  /* dst short broadcast */
     frame[7] = 0x00; frame[8] = 0x00;  /* src short = 0x0000 */
     ts_beacon_t *b = (ts_beacon_t *)&frame[9];
