@@ -68,10 +68,23 @@ python/
   discovery payload parser), `SemanticPrimitiveListener` (typed router
   for the 10 HA-MIND primitives from ADR-115 §3.12). 63 tests including
   end-to-end against an in-process `websockets.serve` fixture.
-- ⏳ **P5 — cibuildwheel + PyPI publish**: Linux/macOS/Windows × abi3-py310.
-- ⏳ **P-tomb — v1.99.0 tombstone wheel**: pure-Python ImportError
-  with migration URL, published to PyPI to soft-fence v1.x users
-  before v2.0 ships.
+- ⏳ **P5 — cibuildwheel + PyPI publish (workflow shipped)**: GH Actions
+  workflow `.github/workflows/pip-release.yml` ships the 5-wheel
+  matrix (manylinux x86_64+aarch64, macosx x86_64+arm64, win amd64)
+  plus sdist via `cibuildwheel@2.21`. Publish via PyPI Trusted
+  Publisher (OIDC) on `v2.X.Y-pip` tags or manual dispatch.
+  **One-time PyPI Trusted Publisher registration required before the
+  first publish can fire.** Q3 (witness hash v2 — ADR-117 §11.3)
+  remains the hard gate before tagging.
+- ✅ **P-tomb — v1.99.0 tombstone wheel**: pure-Python wheel
+  (`python/tombstone/`) whose `wifi_densepose/__init__.py` raises
+  ImportError with the migration URL on import. Verified locally
+  (2.7 KB wheel) — `pip install wifi_densepose-1.99.0-py3-none-any.whl`
+  then `python -c "import wifi_densepose"` raises ImportError as
+  expected. Same `pip-release.yml` workflow publishes the tombstone
+  on `v1.99.0-pip` tag. Per ADR-117 §7.3, publish the tombstone
+  BEFORE the first v2.0.0 publish to claim the "current" slot in
+  pip's resolver.
 
 Each phase ends with a checkbox PR. Tests are additive — every phase's
 smoke tests must still pass after later phases land.
