@@ -32,8 +32,12 @@ fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
-/// One scalar per frame: mean amplitude across all subcarriers/streams.
-/// Carries presence/motion energy and the breathing amplitude modulation.
+/// Per-frame scalar: mean amplitude across all subcarriers/streams.
+///
+/// Carries presence/motion energy plus the breathing amplitude modulation.
+/// (Validated live on the ESP32 — picks up breathing where a max-variance
+/// subcarrier instead locks onto motion artifacts. A phase-based carrier on a
+/// *stable* subcarrier is the proper higher-SNR refinement — ADR-151 §4.)
 fn frame_scalar(frame: &CsiFrame) -> f32 {
     let a = &frame.amplitude;
     if a.is_empty() {
