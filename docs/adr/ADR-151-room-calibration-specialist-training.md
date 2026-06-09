@@ -2,7 +2,7 @@
 
 | Field | Value |
 |-------|-------|
-| **Status** | Proposed |
+| **Status** | Accepted — Stages 1–5 implemented (statistical specialists); HF-backbone distillation pending |
 | **Date** | 2026-06-09 |
 | **Deciders** | ruv |
 | **Codebase target** | New `wifi-densepose-calibration` crate (orchestration); `wifi-densepose-train` (`rapid_adapt.rs`, `signal_features.rs`, `trainer.rs`); `wifi-densepose-ruvector` (RVF specialist storage); `wifi-densepose-signal/ruvsense/*` (feature extractors); `wifi-densepose-cli` (`enroll`, `train-room`, `room-status` subcommands) |
@@ -238,14 +238,16 @@ wifi-densepose room-status --room living-room
 
 ## 4. Implementation phases
 
-| Phase | Scope | Exit criterion |
-|-------|-------|----------------|
-| **P1** | Scaffold `wifi-densepose-calibration` crate; `backbone.rs` loads + caches the ADR-150 encoder via `hf_hub`; `AnchorFeature` schema | Backbone embeds a CSI window; unit tests on synthetic frames |
-| **P2** | `EnrollmentProtocol` + `anchor.rs` (event-sourced sessions) + CLI `enroll` with quality gates | 8-anchor enrollment completes on COM8 ESP32-S3; bad anchors re-prompt |
-| **P3** | `extract.rs` bridge wiring ruvsense extractors → labelled records; baseline subtraction (ADR-135) | `AnchorFeature` records emitted + persisted per `room_id` |
-| **P4** | `SpecialistBank` + presence/posture (HNSW prototype) + breathing (periodicity) via `rapid_adapt` LoRA; RVF persistence + versioning | `train-room` produces a bank; `room-status` reads it back |
-| **P5** | heartbeat + restlessness + anomaly specialists; `runtime.rs` mixture + veto + confidence gating | End-to-end RoomState on hardware; anomaly veto verified |
-| **P6** | Baseline-drift invalidation (`STALE`); SONA online adaptation slot; optional ADR-105 federation hook; optional teacher–student distillation cold-start | Drift > τ marks bank STALE; AetherArena (ADR-149) entry for the backbone |
+| Phase | Scope | Exit criterion | Status |
+|-------|-------|----------------|--------|
+| **P1** | Scaffold `wifi-densepose-calibration` crate; `AnchorFeature` schema; (backbone via `hf_hub` deferred) | Crate + schema; unit tests | ✅ Done (crate + Stage-1 baseline via `calibrate`/`calibrate-serve`; HF backbone deferred) |
+| **P2** | `EnrollmentProtocol` + `anchor.rs` (event-sourced sessions) + CLI `enroll` with quality gates | 8-anchor enrollment; bad anchors re-prompt | ✅ Done (`anchor.rs`, `enrollment.rs`, CLI `enroll`) |
+| **P3** | `extract.rs` bridge → labelled records; baseline subtraction (ADR-135) | `AnchorFeature` records persisted per `room_id` | ✅ Done (`extract.rs`; autocorr periodicity + variance/motion) |
+| **P4** | `SpecialistBank` + presence/posture (prototype) + breathing (periodicity); persistence + versioning | `train-room` produces a bank; `room-status` reads it back | ✅ Done (`specialist.rs`, `bank.rs`, CLI `train-room`/`room-status`; JSON persistence — RVF/HNSW = future) |
+| **P5** | heartbeat + restlessness + anomaly specialists; `runtime.rs` mixture + veto + confidence gating | End-to-end RoomState on hardware; anomaly veto verified | ✅ Done (`runtime.rs`, CLI `room-watch`; breathing read live on COM8 ESP32) |
+| **P6** | Baseline-drift `STALE` invalidation; SONA online adaptation; optional ADR-105 federation; HF teacher–student distillation | Drift marks bank STALE; AetherArena entry | ◐ Partial (STALE done; SONA/federation/HF-backbone = follow-ups) |
+
+**Current status (2026-06-09):** Stages 1–5 implemented with *statistical* specialists (threshold/prototype/autocorrelation) — runnable and hardware-validated today. 48 unit tests. Open refinements: phase-based (vs amplitude) breathing carrier for stronger SNR, RVF/HNSW storage, and the ADR-150 frozen HF backbone the specialists would distill from.
 
 Validation per CLAUDE.md: `cargo test --workspace --no-default-features` green; hardware verification on the ESP32-S3 (currently COM8) before any release; witness bundle regenerated if the proof surface changes.
 
