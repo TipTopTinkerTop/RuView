@@ -20,6 +20,26 @@ use crate::stimulus::StimulusParameters;
 /// claim, no disease claim — only a statement that evidence is insufficient.
 pub const NO_CLAIM: &str = "research use only — acceptance criteria not yet met; no claim";
 
+/// **The hard claim-gate invariant** (ADR-250 §23.1). The single source of
+/// truth used everywhere a claim could be released:
+///
+/// ```text
+/// claim_allowed = entrainment_pass AND safety_pass
+///              AND adherence_pass  AND repeatability_pass
+/// ```
+///
+/// Anything short of all four returns the research-only string. Centralizing it
+/// here means no path can accidentally weaken the gate to an OR or a subset.
+#[inline]
+pub fn claim_allowed(
+    entrainment_pass: bool,
+    safety_pass: bool,
+    adherence_pass: bool,
+    repeatability_pass: bool,
+) -> bool {
+    entrainment_pass && safety_pass && adherence_pass && repeatability_pass
+}
+
 /// Thresholds a program must clear (ADR-250 §18 generalized). Defaults mirror
 /// the ADR's published targets; programs may tighten them.
 #[derive(Debug, Clone, Copy)]
@@ -183,7 +203,8 @@ impl AcceptanceHarness {
         let safety_pass = safety_stop_rate <= c.max_safety_stop_rate;
         let adherence_pass = mean_adherence >= c.min_adherence;
         let repeatability_pass = repeatability_band_hz <= c.max_repeatability_band_hz;
-        let overall_pass = entrainment_pass && safety_pass && adherence_pass && repeatability_pass;
+        let overall_pass =
+            claim_allowed(entrainment_pass, safety_pass, adherence_pass, repeatability_pass);
 
         AcceptanceReport {
             program_id: program.id.to_string(),
@@ -242,6 +263,24 @@ fn spread(v: &[f64]) -> f64 {
 mod tests {
     use super::*;
     use crate::response::{RuViewState, SleepState};
+
+    #[test]
+    fn claim_allowed_requires_all_four_and_rejects_every_subset() {
+        // All four → allowed.
+        assert!(claim_allowed(true, true, true, true));
+        // Every 3-of-4 subset (one false) → denied. This is the AND, not OR,
+        // guarantee the whole gate rests on.
+        let one_false = [
+            (false, true, true, true),
+            (true, false, true, true),
+            (true, true, false, true),
+            (true, true, true, false),
+        ];
+        for (e, s, a, r) in one_false {
+            assert!(!claim_allowed(e, s, a, r), "subset {e}{s}{a}{r} must be denied");
+        }
+        assert!(!claim_allowed(false, false, false, false));
+    }
 
     fn detuned_subject() -> (String, LatentPerson) {
         // A subject whose latent peak is clearly off the prior frequency, so an

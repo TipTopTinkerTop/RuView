@@ -70,6 +70,7 @@
 
 pub mod acceptance;
 pub mod bandit;
+pub mod hil;
 pub mod math;
 pub mod objective;
 pub mod optimizer;

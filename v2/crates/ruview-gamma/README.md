@@ -1,4 +1,65 @@
-# ruview-gamma — Adaptive Gamma Entrainment (ADR-250)
+# ruview-gamma — Adaptive Sensory Neuromodulation (ADR-250)
+
+> **The most valuable thing here is not 40 Hz. It is a governed personalization
+> engine that refuses to overpromise.**
+
+The control brain for an adaptive light-and-sound neuromodulation device. The
+device plays stimulation; **RuView** reads the body as feedback; **RuVector**
+learns the personal response map; **RuFlo** governs the safety, audit trail, and
+claim boundary. The breakthrough is not speed alone — it is **safe adaptive
+personalization with proof discipline**.
+
+It starts from 40 Hz as the research prior, then learns whether a person
+responds better at 38.5, 40, 41.2, or another safe setting — watching breathing,
+stillness, restlessness, adherence, and sensor confidence. If something goes
+wrong, the session locks. If a program has not proven entrainment, safety,
+adherence, and repeatability, it cannot advertise a benefit — it returns
+*research use only*.
+
+## Benchmarks (this container — indicative)
+
+| Path | Current | Role |
+|------|---------|------|
+| Safety tick | ~8 ns | real-time stop path |
+| Recommendation | ~15 µs | per-session decision |
+| Cohort kNN (500 profiles) | ~15 µs | warm-start matching |
+| Calibration sweep | ~115 µs | setup and tuning |
+| Full acceptance grading | ~425 µs | enrollment-only (offline) |
+
+The per-session control loop is microseconds; the heavier acceptance grading is
+enrollment-time work, not on the loop. No regression across the optimization
+passes.
+
+## The hard claim gate
+
+A program's benefit claim is releasable through exactly one invariant
+(`acceptance::claim_allowed`), used everywhere:
+
+```text
+claim_allowed = entrainment_pass AND safety_pass
+             AND adherence_pass  AND repeatability_pass
+```
+
+Anything short of all four returns `research use only — … no claim`
+(`acceptance::NO_CLAIM`). The marketing claim is unreadable except through the
+gate.
+
+## Next milestone — hardware in the loop (`hil`)
+
+The software core is proven against a deterministic simulator; the next
+acceptance bar is a real LED + speaker actuator (e.g. ESP32-driven) plus the
+stop path. `hil::verify_hil` grades a captured bench measurement against fixed
+targets:
+
+| Test | Target |
+|------|--------|
+| LED frequency accuracy | ±0.1 Hz |
+| Audio-visual sync drift | < 5 ms |
+| Stop signal → actuator off | < 100 ms |
+| Session-hash reproducibility | 100% |
+| EEG entrainment lift vs fixed 40 Hz | ≥ 20% |
+
+---
 
 Governed, deterministic, **safety-constrained** personalization of 40 Hz-prior
 multisensory (light + sound) stimulation. Treats 40 Hz as the evidence-based
@@ -44,7 +105,8 @@ conservative floor, never the cap.
 | `bandit` | §8 P3 | LinUCB contextual bandit over envelope-safe arms |
 | `ruvector` | §10 items 3–6 | anonymized `ProfileStore` (one-way hashed tags), deterministic kNN, cohort warm-start priors (down-weighted pseudo-observations), `DriftDetector` over the physiological sub-vector, deterministic k-means clustering |
 | `program` | §23 | `NeuroProgram` catalog (7 use cases) — per-program envelope, prior, objective, state-gating, evidence level, and gated claim |
-| `acceptance` | §18/§23.1 | `AcceptanceHarness` + `ClaimGate` — entrainment/safety/adherence/repeatability gate; a program's claim is unreadable until all four pass |
+| `acceptance` | §18/§23.1 | `AcceptanceHarness` + `ClaimGate` + the `claim_allowed` invariant — entrainment/safety/adherence/repeatability gate; a program's claim is unreadable until all four pass |
+| `hil` | §17/§21 M2 | hardware-in-the-loop contract: `verify_hil` grades a captured actuator measurement (LED ±0.1 Hz, A/V sync < 5 ms, stop < 100 ms, hash 100%, EEG lift ≥ 20%) |
 | `session` | §11, §13 | hashable `SessionRecord`, reproducible `session_hash` (SHA-256, quantized canonical form) |
 | `ruflo` | §11 | consent → exclusion → envelope → run → monitor → score → update → witnessed audit; trial/sham mode; clinician export; claim discipline |
 | `proof` | — | deterministic bundle witness (mirrors `nvsim` / `verify.py`) |
