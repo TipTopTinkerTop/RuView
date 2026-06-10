@@ -12,6 +12,7 @@
 mod adaptive_classifier;
 pub mod cli;
 pub mod csi;
+mod engine_bridge;
 mod field_bridge;
 mod multistatic_bridge;
 pub mod pose;
@@ -988,6 +989,12 @@ struct AppStateInner {
     last_tracker_instant: Option<std::time::Instant>,
     /// Attention-weighted multi-node CSI fusion engine.
     multistatic_fuser: MultistaticFuser,
+    /// Governed trust-path bridge (ADR-135..146): runs the same live frames
+    /// through the privacy/provenance/witness control plane. Additive — does not
+    /// affect person-count behavior; produces the auditable belief + witness.
+    engine_bridge: engine_bridge::EngineBridge,
+    /// Witness of the most recent governed trust cycle (BLAKE3), for audit/UI.
+    pub(crate) last_trust_witness: Option<[u8; 32]>,
     /// SVD-based room field model for eigenvalue person counting (None until calibration).
     field_model: Option<FieldModel>,
     // ── ADR-044 §5.2: adaptive rolling-p95 normalization ─────────────────────
@@ -4986,6 +4993,23 @@ async fn udp_receiver_task(state: SharedState, udp_port: u16) {
                         0
                     };
 
+                    // Governed trust cycle (ADR-135..146): run the same live
+                    // frames through the privacy/provenance/witness control
+                    // plane. Split-borrow the two distinct fields off the guard.
+                    {
+                        let sref: &mut AppStateInner = &mut s;
+                        let now_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as i64)
+                            .unwrap_or(0);
+                        if let Some(Ok(trust)) = sref
+                            .engine_bridge
+                            .process_cycle_from_states(&sref.node_states, now_ms)
+                        {
+                            sref.last_trust_witness = Some(trust.witness);
+                        }
+                    }
+
                     // Feed field model calibration if active (use per-node history for ESP32).
                     if let Some(frame_history) = s
                         .node_states
@@ -5409,6 +5433,23 @@ async fn udp_receiver_task(state: SharedState, udp_port: u16) {
                         s.prev_person_count = 0;
                         0
                     };
+
+                    // Governed trust cycle (ADR-135..146): run the same live
+                    // frames through the privacy/provenance/witness control
+                    // plane. Split-borrow the two distinct fields off the guard.
+                    {
+                        let sref: &mut AppStateInner = &mut s;
+                        let now_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as i64)
+                            .unwrap_or(0);
+                        if let Some(Ok(trust)) = sref
+                            .engine_bridge
+                            .process_cycle_from_states(&sref.node_states, now_ms)
+                        {
+                            sref.last_trust_witness = Some(trust.witness);
+                        }
+                    }
 
                     // Feed field model calibration if active (use per-node history for ESP32).
                     if let Some(frame_history) = s
@@ -6721,6 +6762,13 @@ async fn main() {
             }
             fuser
         },
+        engine_bridge: engine_bridge::EngineBridge::new(
+            wifi_densepose_bfld::PrivacyMode::PrivateHome,
+            1,
+            "default",
+            "Default Room",
+        ),
+        last_trust_witness: None,
         field_model: if args.calibrate {
             info!("Field model calibration enabled — room should be empty during startup");
             FieldModel::new(field_bridge::single_link_config()).ok()

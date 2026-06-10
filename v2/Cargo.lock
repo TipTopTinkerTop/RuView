@@ -11089,9 +11089,13 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ureq 2.12.1",
+ "wifi-densepose-bfld",
+ "wifi-densepose-engine",
+ "wifi-densepose-geo 0.1.0",
  "wifi-densepose-hardware",
  "wifi-densepose-signal",
  "wifi-densepose-wifiscan",
+ "wifi-densepose-worldgraph 0.3.0",
 ]
 
 [[package]]
