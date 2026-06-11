@@ -12,6 +12,7 @@
 mod adaptive_classifier;
 pub mod cli;
 pub mod csi;
+mod engine_bridge;
 mod field_bridge;
 mod multistatic_bridge;
 pub mod pose;
@@ -226,13 +227,26 @@ struct Esp32Frame {
     magic: u32,
     node_id: u8,
     n_antennas: u8,
-    n_subcarriers: u8,
+    /// u16 since ADR-110 / issue #1005: ESP32-C6 HE-SU frames carry 256
+    /// subcarrier bins (242 active HE20 tones). HT frames stay ≤128.
+    n_subcarriers: u16,
     freq_mhz: u16,
     sequence: u32,
     rssi: i8,
     noise_floor: i8,
+    /// ADR-110 byte 18: PPDU type the CSI was sampled from. Pre-ADR-110
+    /// firmware sends 0 ⇒ `PpduType::HtLegacy`.
+    ppdu_type: wifi_densepose_hardware::PpduType,
     amplitudes: Vec<f64>,
     phases: Vec<f64>,
+}
+
+impl Esp32Frame {
+    /// The `(n_subcarriers, ppdu_type)` symbol-grid identity of this frame.
+    /// HT-LTF and HE-LTF grids are not bin-comparable (ADR-110 / #1005).
+    fn grid(&self) -> (u16, wifi_densepose_hardware::PpduType) {
+        (self.n_subcarriers, self.ppdu_type)
+    }
 }
 
 /// Sensing update broadcast to WebSocket clients
@@ -442,6 +456,12 @@ struct NodeState {
     /// Most recent novelty score in [0.0, 1.0] (0 = exact-match in bank,
     /// 1 = no overlap). Consumed by the model-wake gate downstream.
     pub(crate) last_novelty_score: Option<f32>,
+    /// ADR-110 / issue #1005: the `(n_subcarriers, ppdu_type)` grid this
+    /// node's rolling windows were built on. ESP32-C6 nodes interleave
+    /// HE-SU 256-bin frames with HT 64-bin frames on one socket; mixing
+    /// the two symbol grids in `frame_history` corrupts variance/baseline
+    /// statistics. See [`NodeState::accept_grid`].
+    active_grid: Option<(u16, wifi_densepose_hardware::PpduType)>,
 }
 
 /// Default EMA alpha for temporal keypoint smoothing (RuVector Phase 2).
@@ -647,6 +667,35 @@ impl NodeState {
                 ),
             ),
             last_novelty_score: None,
+            active_grid: None,
+        }
+    }
+
+    /// ADR-110 / issue #1005 grid gate: decide whether a frame on `grid`
+    /// may enter this node's feature path, and update `active_grid`.
+    ///
+    /// Returns `true` to accept. Policy: lock onto the densest grid seen.
+    /// On a grid *upgrade* (more subcarriers — e.g. the first HE-SU 256-bin
+    /// frame after HT 64-bin history) the rolling amplitude history and
+    /// motion baseline are cleared so HT and HE symbol grids are never
+    /// mixed in one window. Sparser-grid frames (the ~16% HT minority an
+    /// ESP32-C6 keeps emitting alongside HE) are rejected from the feature
+    /// path; the caller still records the arrival for fps/liveness.
+    fn accept_grid(&mut self, grid: (u16, wifi_densepose_hardware::PpduType)) -> bool {
+        match self.active_grid {
+            None => {
+                self.active_grid = Some(grid);
+                true
+            }
+            Some(active) if active == grid => true,
+            Some((active_n, _)) if grid.0 > active_n => {
+                self.active_grid = Some(grid);
+                self.frame_history.clear();
+                self.baseline_motion = 0.0;
+                self.baseline_frames = 0;
+                true
+            }
+            Some(_) => false,
         }
     }
 
@@ -988,6 +1037,13 @@ struct AppStateInner {
     last_tracker_instant: Option<std::time::Instant>,
     /// Attention-weighted multi-node CSI fusion engine.
     multistatic_fuser: MultistaticFuser,
+    /// Governed trust-path bridge (ADR-135..146): runs the same live frames
+    /// through the privacy/provenance/witness control plane. Does not alter
+    /// person-count behavior; its trust state (witness, effective class,
+    /// recalibration flag, error count) is recorded on the bridge itself and
+    /// exposed via `GET /api/v1/status`, and a Restricted-class cycle strips
+    /// per-node raw amplitudes from the live publish (review finding 1).
+    engine_bridge: engine_bridge::EngineBridge,
     /// SVD-based room field model for eigenvalue person counting (None until calibration).
     field_model: Option<FieldModel>,
     // ── ADR-044 §5.2: adaptive rolling-p95 normalization ─────────────────────
@@ -1374,19 +1430,25 @@ fn parse_esp32_frame(buf: &[u8]) -> Option<Esp32Frame> {
     //   [17]     noise_floor (i8)
     //   [18..19] reserved
     //   [20..]   I/Q data
+    // Issue #1005: until 2026-06 this code read n_subcarriers from byte 6
+    // alone (an ESP32-C6 HE-SU frame's 256 = 0x0100 LE decoded as 0 — the
+    // frame parsed with zero subcarriers) and read sequence/rssi/noise at
+    // stale offsets 10/14/15. Offsets below match the comment (and firmware).
     let node_id = buf[4];
     let n_antennas = buf[5];
-    let n_subcarriers = buf[6];
-    let freq_mhz = u16::from_le_bytes([buf[8], buf[9]]);
-    let sequence = u32::from_le_bytes([buf[10], buf[11], buf[12], buf[13]]);
-    let rssi_raw = buf[14] as i8;
+    let n_subcarriers = u16::from_le_bytes([buf[6], buf[7]]);
+    let freq_mhz =
+        u16::try_from(u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]])).unwrap_or(0);
+    let sequence = u32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]]);
+    let rssi_raw = buf[16] as i8;
     // Fix RSSI sign: ensure it's always negative (dBm convention).
     let rssi = if rssi_raw > 0 {
         rssi_raw.saturating_neg()
     } else {
         rssi_raw
     };
-    let noise_floor = buf[15] as i8;
+    let noise_floor = buf[17] as i8;
+    let ppdu_type = wifi_densepose_hardware::PpduType::from_byte(buf[18]);
 
     let iq_start = 20;
     let n_pairs = n_antennas as usize * n_subcarriers as usize;
@@ -1415,6 +1477,7 @@ fn parse_esp32_frame(buf: &[u8]) -> Option<Esp32Frame> {
         sequence,
         rssi,
         noise_floor,
+        ppdu_type,
         amplitudes,
         phases,
     })
@@ -2296,11 +2359,12 @@ async fn windows_wifi_task(state: SharedState, tick_ms: u64) {
             magic: 0xC511_0001,
             node_id: 0,
             n_antennas: 1,
-            n_subcarriers: obs_count.min(255) as u8,
+            n_subcarriers: obs_count.min(u16::MAX as usize) as u16,
             freq_mhz: 2437,
             sequence: seq,
             rssi: first_rssi.clamp(-128.0, 127.0) as i8,
             noise_floor: -90,
+            ppdu_type: wifi_densepose_hardware::PpduType::HtLegacy,
             amplitudes: multi_ap_frame.amplitudes.clone(),
             phases: multi_ap_frame.phases.clone(),
         };
@@ -2482,6 +2546,7 @@ async fn windows_wifi_fallback_tick(state: &SharedState, seq: u32) {
         sequence: seq,
         rssi: rssi_dbm as i8,
         noise_floor: -90,
+        ppdu_type: wifi_densepose_hardware::PpduType::HtLegacy,
         amplitudes: vec![signal_pct],
         phases: vec![0.0],
     };
@@ -2615,7 +2680,11 @@ async fn probe_esp32(port: u16) -> bool {
     let addr = format!("0.0.0.0:{port}");
     match UdpSocket::bind(&addr).await {
         Ok(sock) => {
-            let mut buf = [0u8; 256];
+            // 2048 covers the largest ADR-018 frame: an ESP32-C6 HE-SU
+            // capture is 532 bytes (issue #1005); on Windows a too-small
+            // recv buffer makes recv_from error on the oversized datagram,
+            // which made this probe fail against HE-only streams.
+            let mut buf = [0u8; 2048];
             match tokio::time::timeout(Duration::from_secs(2), sock.recv_from(&mut buf)).await {
                 Ok(Ok((len, _))) => parse_esp32_frame(&buf[..len]).is_some(),
                 _ => false,
@@ -2644,11 +2713,12 @@ fn generate_simulated_frame(tick: u64) -> Esp32Frame {
         magic: 0xC511_0001,
         node_id: 1,
         n_antennas: 1,
-        n_subcarriers: n_sub as u8,
+        n_subcarriers: n_sub as u16,
         freq_mhz: 2437,
         sequence: tick as u32,
         rssi: (-40.0 + 5.0 * (t * 0.2).sin()) as i8,
         noise_floor: -90,
+        ppdu_type: wifi_densepose_hardware::PpduType::HtLegacy,
         amplitudes,
         phases,
     }
@@ -3734,11 +3804,31 @@ async fn health_live(State(state): State<SharedState>) -> Json<serde_json::Value
     }))
 }
 
+/// Lowercase hex of a 32-byte witness for JSON exposure.
+fn witness_hex(w: [u8; 32]) -> String {
+    use std::fmt::Write;
+    w.iter().fold(String::with_capacity(64), |mut acc, b| {
+        let _ = write!(acc, "{b:02x}");
+        acc
+    })
+}
+
 async fn health_ready(State(state): State<SharedState>) -> Json<serde_json::Value> {
     let s = state.read().await;
     Json(serde_json::json!({
         "status": "ready",
         "source": s.effective_source(),
+        // Governed trust-path state (ADR-135..146; review finding 1b): latest
+        // witness + privacy class + recalibration flag, and the engine error
+        // audit — previously write-only on AppState, now readable here.
+        "trust": {
+            "last_witness": s.engine_bridge.last_trust_witness().map(witness_hex),
+            "effective_class": s.engine_bridge.effective_class().map(|c| format!("{c:?}")),
+            "demoted": s.engine_bridge.demoted(),
+            "recalibration_recommended": s.engine_bridge.recalibration_recommended(),
+            "engine_error_count": s.engine_bridge.engine_error_count(),
+            "raw_outputs_suppressed": s.engine_bridge.suppress_raw_outputs(),
+        },
     }))
 }
 
@@ -4986,6 +5076,21 @@ async fn udp_receiver_task(state: SharedState, udp_port: u16) {
                         0
                     };
 
+                    // Governed trust cycle (ADR-135..146): run the same live
+                    // frames through the privacy/provenance/witness control
+                    // plane. Trust state is recorded on the bridge (exposed on
+                    // /api/v1/status); engine errors are counted + rate-limit
+                    // logged instead of being swallowed (review finding 1).
+                    // Split-borrow the two distinct fields off the guard.
+                    {
+                        let sref: &mut AppStateInner = &mut s;
+                        let now_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as i64)
+                            .unwrap_or(0);
+                        sref.engine_bridge.observe_cycle(&sref.node_states, now_ms);
+                    }
+
                     // Feed field model calibration if active (use per-node history for ESP32).
                     if let Some(frame_history) = s
                         .node_states
@@ -5231,6 +5336,34 @@ async fn udp_receiver_task(state: SharedState, udp_port: u16) {
                     s.source = "esp32".to_string();
                     s.last_esp32_frame = Some(std::time::Instant::now());
 
+                    // ── ADR-110 / issue #1005: per-node subcarrier-grid gate ──
+                    // ESP32-C6 nodes interleave HE-SU 256-bin frames (~84%)
+                    // with HT 64-bin frames on the same socket. HT-LTF and
+                    // HE-LTF symbol grids are not bin-comparable, so a frame
+                    // on a different grid than the node's rolling window must
+                    // not enter the feature path. Policy (NodeState::accept_grid):
+                    // lock onto the densest grid seen, clear+re-warm on
+                    // upgrade, skip sparser-grid frames (arrival still
+                    // recorded for fps/liveness).
+                    let grid_accepted = s
+                        .node_states
+                        .entry(frame.node_id)
+                        .or_insert_with(NodeState::new)
+                        .accept_grid(frame.grid());
+                    if !grid_accepted {
+                        debug!(
+                            "node {}: skipping {}-subcarrier {:?} frame (active grid {:?})",
+                            frame.node_id,
+                            frame.n_subcarriers,
+                            frame.ppdu_type,
+                            s.node_states.get(&frame.node_id).and_then(|ns| ns.active_grid),
+                        );
+                        if let Some(ns) = s.node_states.get_mut(&frame.node_id) {
+                            ns.observe_csi_frame_arrival(std::time::Instant::now());
+                        }
+                        continue;
+                    }
+
                     // Also maintain global frame_history for backward compat
                     // (simulation path, REST endpoints, etc.).
                     s.frame_history.push_back(frame.amplitudes.clone());
@@ -5410,6 +5543,21 @@ async fn udp_receiver_task(state: SharedState, udp_port: u16) {
                         0
                     };
 
+                    // Governed trust cycle (ADR-135..146): run the same live
+                    // frames through the privacy/provenance/witness control
+                    // plane. Trust state is recorded on the bridge (exposed on
+                    // /api/v1/status); engine errors are counted + rate-limit
+                    // logged instead of being swallowed (review finding 1).
+                    // Split-borrow the two distinct fields off the guard.
+                    {
+                        let sref: &mut AppStateInner = &mut s;
+                        let now_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as i64)
+                            .unwrap_or(0);
+                        sref.engine_bridge.observe_cycle(&sref.node_states, now_ms);
+                    }
+
                     // Feed field model calibration if active (use per-node history for ESP32).
                     if let Some(frame_history) = s
                         .node_states
@@ -5421,7 +5569,15 @@ async fn udp_receiver_task(state: SharedState, udp_port: u16) {
                         }
                     }
 
-                    // Build nodes array with all active nodes.
+                    // Build nodes array with all active nodes. ADR-141 output
+                    // gating (review finding 1c): when the governed engine
+                    // emitted this cycle at class Restricted (base mode, or a
+                    // contradiction/mesh-risk demotion below the configured
+                    // class), the per-node raw amplitude vectors are suppressed
+                    // from the live publish — the same field mapping bfld's
+                    // privacy gate applies at Restricted (drop amplitude/phase
+                    // proxies).
+                    let suppress_raw = s.engine_bridge.suppress_raw_outputs();
                     let active_nodes: Vec<NodeInfo> = s
                         .node_states
                         .iter()
@@ -5433,12 +5589,19 @@ async fn udp_receiver_task(state: SharedState, udp_port: u16) {
                             node_id: id,
                             rssi_dbm: n.rssi_history.back().copied().unwrap_or(0.0),
                             position: [2.0, 0.0, 1.5],
-                            amplitude: n
-                                .frame_history
-                                .back()
-                                .map(|a| a.iter().take(56).cloned().collect())
-                                .unwrap_or_default(),
-                            subcarrier_count: n.frame_history.back().map_or(0, |a| a.len()),
+                            amplitude: if suppress_raw {
+                                vec![]
+                            } else {
+                                n.frame_history
+                                    .back()
+                                    .map(|a| a.iter().take(56).cloned().collect())
+                                    .unwrap_or_default()
+                            },
+                            subcarrier_count: if suppress_raw {
+                                0
+                            } else {
+                                n.frame_history.back().map_or(0, |a| a.len())
+                            },
                             // ADR-110 iter 23 / iter 30 — single source of truth.
                             sync: n.sync_snapshot(),
                         })
@@ -6721,6 +6884,12 @@ async fn main() {
             }
             fuser
         },
+        engine_bridge: engine_bridge::EngineBridge::new(
+            wifi_densepose_bfld::PrivacyMode::PrivateHome,
+            1,
+            "default",
+            "Default Room",
+        ),
         field_model: if args.calibrate {
             info!("Field model calibration enabled — room should be empty during startup");
             FieldModel::new(field_bridge::single_link_config()).ok()
