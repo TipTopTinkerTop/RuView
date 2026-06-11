@@ -233,6 +233,40 @@ for size → static QDQ conv-only (Percentile or MinMax,
 `results/retrained_int8_static_percentile_conv.onnx`), which strictly
 dominates dynamic int8 on accuracy at ~equal latency and +0.09 MB.
 
+## Efficiency sweep (MEASURED, overnight 2026-06-10/11)
+
+ADR-152 beyond-SOTA track: compact purpose-built variants of the WiFlow-STD
+architecture, trained from scratch on the same cleaned dataset, identical
+seed-42 file-level split, loss and protocol as the measurement-(a) reference
+(fp32, batch 64, ≤50 epochs, patience 5; RTX 5080, ~22–29 min/variant).
+Variant transforms are pure channel/group/stride scalings of an
+architecture-exact parameterized model (validated: reproduces 2,225,042 params
+at the reference config). Scripts: `remote/sweep/`; raw:
+`results/efficiency_sweep.jsonl`; checkpoints `results/{half,quarter,tiny}_best.pth`
+(gitignored).
+
+| Variant | Params | vs 2.23M | Clean-test PCK@20 | PCK@50 | MPJPE | Best epoch |
+|---|---|---|---|---|---|---|
+| full (reference, meas. a) | 2,225,042 | 1× | 96.61% | 99.11% | 0.0094 | 36 |
+| **half** | **843,834** | **0.38×** | **96.62%** | **99.47%** | **0.00898** | 23 |
+| quarter | 338,600 | 0.15× | 96.05% | 99.43% | 0.00928 | 50 |
+| tiny | 56,290 | 0.025× | 94.11% | 99.36% | 0.0125 | 47 |
+
+Findings:
+
+- **The half model (843k params) strictly dominates the full reference** on
+  this dataset — equal PCK@20, better PCK@50 and MPJPE, converges in fewer
+  epochs. The published 2.23M architecture is over-parameterized for its own
+  benchmark.
+- **tiny (56k params, 1/39.5) holds 94.11% PCK@20** — a ~220 KB fp32 /
+  ~60 KB int8-class model in reach of severely constrained edge targets,
+  at −2.5 pt from the full reference.
+- Caveats: in-domain (5-subject random-file split) like every number on this
+  dataset; single run per variant; corruption-free test subset (52,560).
+  Cross-domain behavior of compact variants is untested — ADR-150's evidence
+  says capacity *hurts* cross-subject, so the compact end may generalize no
+  worse, but that is a hypothesis, not a measurement.
+
 ## Measurement (b): BLOCKED-ON-DATA (attempted 2026-06-10)
 
 The fine-tune-on-ESP32 measurement stopped at dataset characterization, per the
