@@ -37,6 +37,17 @@ clap = { version = "4", features = ["derive", "env"] }
 anyhow = "1"
 serde_json = "1"
 axum = { version = "0.7", features = ["macros"] }
+# Static-file serving for the HOMECORE-UI dashboard (ADR-131) mounted at /homecore.
+tower-http = { version = "0.6", features = ["fs", "trace"] }
+# BFF gateway (ADR-131 §11): reverse-proxy the calibration API + aggregate
+# upstreams. rustls to avoid an OpenSSL system dep on the appliance.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+# Drive the assembled router in integration tests via ServiceExt::oneshot.
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
 
 [features]
 default = []
