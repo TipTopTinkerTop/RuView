@@ -1,0 +1,16 @@
+{
+  "TheMatrix": {
+    "ssid": "TheMatrix",
+    "mean_score": 0.3549948147279718,
+    "std_score": 0.10074168866464796,
+    "sample_count": 497,
+    "last_updated": 1781957399.5305326
+  },
+  "Marentzius": {
+    "ssid": "Marentzius",
+    "mean_score": 0.21188641552222157,
+    "std_score": 0.10158310276887954,
+    "sample_count": 209,
+    "last_updated": 1781957281.6754184
+  }
+}
