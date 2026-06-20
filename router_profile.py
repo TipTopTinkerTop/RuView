@@ -1,8 +1,8 @@
 """
 router_profile.py
 
-Per-router (per-SSID or per-BSSID) adaptive baseline learning for the floor
-motion detector addon.
+Per-router (per-SSID) adaptive baseline learning for the floor motion
+detector addon.
 
 This module is intentionally standalone: it does NOT modify
 v1/src/sensing/rssi_collector.py. WifiSample objects from that module carry
@@ -12,8 +12,8 @@ interfaces` call the collector already uses internally.
 
 Design
 ------
-- One JSON file on disk (default: router_profiles.json) holds profiles
-  keyed by SSID or BSSID (e.g. "MyRouter" or "40b076235450").
+- One JSON file on disk (default: router_profiles.json) holds a dict of
+  profiles keyed by SSID.
 - Each profile tracks a running mean/std of the motion score observed
   while the detector judges the room "still" (EMA-based, slow-moving).
 - The adaptive threshold for a profile is derived from its learned
@@ -28,8 +28,6 @@ Design
   caller is expected to poll get_current_ssid() periodically and switch
   the active profile when it changes (e.g. moving the laptop to a
   different room/router).
-- Profiles can now have an optional location label for cross-network
-  consensus scoring (e.g. "kitchen", "bedroom", "neighbor-unknown").
 """
 
 from __future__ import annotations
@@ -41,7 +39,7 @@ import re
 import subprocess
 import time
 from dataclasses import dataclass, field, asdict
-from typing import Dict, Optional, List, Tuple
+from typing import Dict, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -97,15 +95,7 @@ MIN_SAMPLES_FOR_ADAPT_DISPLAY = 20  # cosmetic: when to call a profile "learned"
 
 @dataclass
 class RouterProfile:
-    """
-    Profile for a single WiFi router/network (identified by SSID or BSSID).
-
-    For multi-network mode, profiles are keyed by BSSID (e.g. "40b076235450")
-    and can have an optional location label (e.g. "kitchen", "bedroom").
-    """
-    ssid: str                      # SSID name (for single-network mode) or empty for BSSID-only
-    bssid: str = ""                 # BSSID (empty for backwards compat)
-    label: str = ""                 # Optional location label (e.g. "kitchen")
+    ssid: str
     mean_score: float = DEFAULT_MEAN_SCORE
     std_score: float = DEFAULT_STD_SCORE
     sample_count: int = 0
@@ -140,40 +130,17 @@ class RouterProfile:
         return True
 
     def to_dict(self) -> dict:
-        d = asdict(self)
-        # Only include fields that are not default/empty
-        if self.bssid:
-            d["bssid"] = self.bssid
-        if self.label:
-            d["label"] = self.label
-        return d
+        return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict) -> "RouterProfile":
-        # Handle both SSID-keyed and BSSID-keyed profiles
-        ssid = data.get("ssid", "")
-        bssid = data.get("bssid", "")
-        label = data.get("label", "")
-
-        # If both SSID and BSSID are present, prefer BSSID for multi-network
-        if bssid:
-            return cls(
-                ssid=ssid,
-                bssid=bssid,
-                label=label,
-                mean_score=data.get("mean_score", DEFAULT_MEAN_SCORE),
-                std_score=data.get("std_score", DEFAULT_STD_SCORE),
-                sample_count=data.get("sample_count", 0),
-                last_updated=data.get("last_updated", time.time()),
-            )
-        else:
-            return cls(
-                ssid=ssid,
-                mean_score=data.get("mean_score", DEFAULT_MEAN_SCORE),
-                std_score=data.get("std_score", DEFAULT_STD_SCORE),
-                sample_count=data.get("sample_count", 0),
-                last_updated=data.get("last_updated", time.time()),
-            )
+        return cls(
+            ssid=data["ssid"],
+            mean_score=data.get("mean_score", DEFAULT_MEAN_SCORE),
+            std_score=data.get("std_score", DEFAULT_STD_SCORE),
+            sample_count=data.get("sample_count", 0),
+            last_updated=data.get("last_updated", time.time()),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -229,80 +196,14 @@ class RouterProfileStore:
 
     # -- profile access ----------------------------------------------------
 
-    def get_or_create(self, key: str) -> RouterProfile:
-        """
-        Get or create a profile for the given key (SSID or BSSID).
+    def get_or_create(self, ssid: str) -> RouterProfile:
+        if ssid not in self._profiles:
+            logger.info("New router profile created for SSID '%s'", ssid)
+            self._profiles[ssid] = RouterProfile(ssid=ssid)
+        return self._profiles[ssid]
 
-        In multi-network mode, use BSSID keys (e.g. "40b076235450").
-        In single-network mode, use SSID keys.
-        """
-        if key not in self._profiles:
-            logger.info("New router profile created for key '%s'", key)
-            self._profiles[key] = RouterProfile(ssid=key)
-        return self._profiles[key]
-
-    def get_or_create_with_label(
-        self,
-        bssid: str,
-        ssid: str = "",
-        label: str = "",
-    ) -> RouterProfile:
-        """
-        Create a new profile with BSSID and optional label.
-        """
-        profile = RouterProfile(
-            ssid=ssid,
-            bssid=bssid,
-            label=label,
-        )
-        self._profiles[bssid] = profile
-        logger.info(
-            "New multi-network profile created for BSSID '%s' "
-            "(label: %s)",
-            bssid,
-            label,
-        )
-        return profile
-
-    def set_label(self, bssid: str, label: str) -> bool:
-        """
-        Set the location label for a tracked network.
-        """
-        profile = self._profiles.get(bssid)
-        if profile:
-            profile.label = label
-            profile.last_updated = time.time()
-            return True
-        logger.warning("No profile found for BSSID '%s'", bssid)
-        return False
-
-    def get_label(self, bssid: str) -> str:
-        """
-        Get the location label for a tracked network.
-        """
-        profile = self._profiles.get(bssid)
-        return profile.label if profile else ""
-
-    def known_ssids(self) -> List[str]:
-        """
-        Return all known keys (SSIDs for single-network, BSSIDs for multi-network).
-        """
+    def known_ssids(self) -> list:
         return sorted(self._profiles.keys())
 
-    def known_bssids(self) -> List[str]:
-        """
-        Return all BSSID-keyed profiles (for multi-network mode).
-        """
-        return sorted([
-            key for key, profile in self._profiles.items()
-            if profile.bssid
-        ])
-
-    def get(self, key: str) -> Optional[RouterProfile]:
-        return self._profiles.get(key)
-
-    def get_all_profiles(self) -> Dict[str, RouterProfile]:
-        """
-        Return a copy of all profiles.
-        """
-        return self._profiles.copy()
+    def get(self, ssid: str) -> Optional[RouterProfile]:
+        return self._profiles.get(ssid)

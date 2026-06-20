@@ -16,29 +16,31 @@ Design
 ------
 - Poll netsh wlan show networks mode=bssid every SCAN_INTERVAL seconds
 - Parse out SSID, BSSID, signal% for each visible network
-- Filter by SIGNAL_FLOOR (default -55 dBm, ~70% signal strength)
+- Filter by SIGNAL_FLOOR_PERCENT (default 35%, the percentage netsh
+  actually reports -- no invented dBm conversion. Windows does not expose
+  true dBm for networks you're not connected to, so working in the native
+  percent unit avoids manufacturing false precision.)
 - Track appearance count; require MIN_CONSECUTIVE_SCANS to qualify as "tracked"
-- Returns a list of NetworkInfo dataclasses with BSSID, SSID, signal_dbm, and tracked status
+- Returns a list of NetworkInfo dataclasses with BSSID, SSID, signal_percent,
+  and tracked status
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 import subprocess
 import time
 from dataclasses import dataclass, field
-from typing import Optional, List
+from typing import List
 
 logger = logging.getLogger(__name__)
 
 
 # Configuration
 SCAN_INTERVAL = 2.0              # seconds between full network scans
-SIGNAL_FLOOR = -70.0             # dBm floor for "strong" networks (~70% signal)
-MIN_SIGNAL_RECENT_SCORE = 0.6   # fraction of recent scans with strong signal to qualify
-MIN_CONSECUTIVE_SCANS = 3       # number of consecutive scans to require
+SIGNAL_FLOOR_PERCENT = 35.0      # netsh's own 0-100% signal reading; skip weaker networks
+MIN_CONSECUTIVE_SCANS = 3        # number of consecutive qualifying scans to require
 
 
 @dataclass
@@ -46,15 +48,18 @@ class NetworkInfo:
     """
     Information about a single visible WiFi network.
     """
-    bssid: str                    # e.g. "AA:BB:CC:DD:EE:FF"
-    ssid: str                     # SSID name, may be empty for hidden networks
-    signal_dbm: float             # signal strength in dBm
-    is_strong: bool               # signal >= SIGNAL_FLOOR
-    appearance_count: int         # total times seen (across all scans)
-    consecutive_strong_scans: int # consecutive scans where this was "strong"
+    bssid: str                    # normalized lowercase, no separators, e.g. "40b076235450"
+    ssid: str                     # SSID name, "(hidden)" if none reported
+    signal_percent: float         # 0-100, exactly as netsh reports it
+    is_strong: bool                # signal_percent >= SIGNAL_FLOOR_PERCENT
+    appearance_count: int         # total scans this BSSID has appeared in
+    consecutive_strong_scans: int  # consecutive scans where this was "strong"
     first_seen: float = field(default_factory=time.time)
     last_seen: float = field(default_factory=time.time)
-    tracked: bool = False         # has this qualified as a tracked source?
+    # Set in exactly one place (NetworkScanner.scan(), after computing
+    # consecutive_strong_scans) -- never computed redundantly elsewhere,
+    # so it can't drift out of sync with the scanner's own qualification rule.
+    tracked: bool = False
 
 
 class NetworkScanner:
@@ -65,97 +70,61 @@ class NetworkScanner:
     def __init__(
         self,
         scan_interval: float = SCAN_INTERVAL,
-        signal_floor: float = SIGNAL_FLOOR,
+        signal_floor_percent: float = SIGNAL_FLOOR_PERCENT,
         min_consecutive_scans: int = MIN_CONSECUTIVE_SCANS,
-        min_signal_recent_score: float = MIN_SIGNAL_RECENT_SCORE,
     ):
         self.scan_interval = scan_interval
-        self.signal_floor = signal_floor
+        self.signal_floor_percent = signal_floor_percent
         self.min_consecutive_scans = min_consecutive_scans
-        self.min_signal_recent_score = min_signal_recent_score
 
-        # Store network state across scans
+        # Single source of truth for all per-BSSID state across scans.
         self._networks: dict[str, NetworkInfo] = {}
         self._last_scan_time = 0.0
-        self._last_networks: dict[str, NetworkInfo] = {}  # previous scan's networks
-        self._tracked_networks: List[NetworkInfo] = []  # networks that qualify
+        self._tracked_networks: List[NetworkInfo] = []
 
-    def _parse_netsh_output(self, output: str) -> dict[str, NetworkInfo]:
+    def _parse_netsh_output(self, output: str) -> "dict[str, tuple[str, float]]":
         """
         Parse netsh wlan show networks mode=bssid output.
 
-        Windows netsh output groups multiple lines per network.
-        We need to:
-        1. Extract all BSSID lines
-        2. Extract all SSID lines that follow BSSID lines
-        3. Extract all Signal lines
-        4. Match them together by network group
+        Single forward pass: track the current SSID as we go, and emit one
+        (bssid -> (ssid, signal_percent)) entry per BSSID line, taking that
+        BSSID's nearest following "Signal : NN%" line. This is simpler and
+        less error-prone than scanning backwards/forwards from each BSSID
+        line independently.
 
-        Returns a dict keyed by BSSID (normalized with colons removed).
+        Returns a dict keyed by the NORMALIZED bssid (lowercase, no
+        separators) -> (ssid, signal_percent).
         """
-        networks: dict[str, NetworkInfo] = {}
-        bssid_lines = []  # List of (line_index, bssid_raw) tuples
+        parsed: "dict[str, tuple[str, float]]" = {}
+        current_ssid = "(hidden)"
+        pending_bssid: "str | None" = None
 
-        # First pass: collect all BSSID lines
-        for i, line in enumerate(output.splitlines()):
-            # Match BSSID: require exactly 6 pairs of hex digits separated by colons
-            # Format: "BSSID N : XX:XX:XX:XX:XX:XX"
-            # Use word boundary and negative lookbehind/lookahead to avoid partial matches
-            bssid_match = re.search(
-                r'BSSID\s*\d*\s*:\s*([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})',
-                line
+        for line in output.splitlines():
+            stripped = line.strip()
+
+            ssid_match = re.match(r"^SSID\s+\d+\s*:\s*(.*)$", stripped, re.IGNORECASE)
+            if ssid_match:
+                current_ssid = ssid_match.group(1).strip() or "(hidden)"
+                pending_bssid = None
+                continue
+
+            bssid_match = re.match(
+                r"^BSSID\s+\d+\s*:\s*([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})",
+                stripped, re.IGNORECASE,
             )
             if bssid_match:
-                bssid_raw = bssid_match.group(1).strip()
-                bssid = re.sub(r'[:-]', '', bssid_raw)  # normalize
-                bssid_lines.append((i, bssid, bssid_raw))
+                bssid_raw = bssid_match.group(1)
+                pending_bssid = re.sub(r"[:-]", "", bssid_raw).lower()
+                continue
 
-        # Second pass: for each BSSID line, find the most recent SSID and Signal
-        for line_idx, _, bssid in bssid_lines:
-            # Find the SSID that comes before this BSSID line (in the same network group)
-            # Look backwards from the BSSID line to find the last SSID line
-            lines = output.splitlines()
-            current_ssid: str | None = None
-            for j in range(line_idx - 1, -1, -1):
-                prev_line = lines[j]
-                ssid_match = re.search(r"SSID\s*\d*\s*:\s*(\S+)", prev_line)
-                if ssid_match:
-                    ssid_val = ssid_match.group(1)
-                    # If there's also a BSSID on this line, it's a new network
-                    bssid_in_this_line = re.search(r"BSSID\s*\d*\s*:\s*[0-9A-Fa-f]", prev_line)
-                    if bssid_in_this_line:
-                        break  # Don't use this SSID, it belongs to a different network
-                    current_ssid = ssid_val if ssid_val else "(hidden)"
-                    break  # Found the SSID for this network
+            signal_match = re.match(r"^Signal\s*:\s*(\d+)\s*%", stripped, re.IGNORECASE)
+            if signal_match and pending_bssid is not None:
+                signal_percent = float(signal_match.group(1))
+                parsed[pending_bssid] = (current_ssid, signal_percent)
+                pending_bssid = None  # this BSSID is fully resolved
+                continue
 
-            # Find the most recent Signal line before the next BSSID line
-            signal_dbm = -100.0  # placeholder
-            signal_line_idx = line_idx + 1
-            while signal_line_idx < len(lines):
-                next_line = lines[signal_line_idx]
-                if re.search(r"BSSID\s*\d*\s*:", next_line):
-                    break  # Next network starting
-                signal_match = re.search(r"Signal\s*:\s*(\d+)%?", next_line)
-                if signal_match:
-                    signal_pct = int(signal_match.group(1))
-                    # Empirical conversion: map netsh signal % to dBm
-                    # 100% -> -30 dBm (excellent), 0% -> -100 dBm (no signal)
-                    signal_dbm = -100.0 + 0.7 * signal_pct
-                signal_line_idx += 1
-
-            # Create or update network entry
-            if bssid not in networks:
-                networks[bssid] = NetworkInfo(
-                    bssid=bssid,
-                    ssid=current_ssid if current_ssid else "(hidden)",
-                    signal_dbm=signal_dbm,
-                    is_strong=signal_dbm >= self.signal_floor,
-                    appearance_count=0,
-                    consecutive_strong_scans=0,
-                )
-            networks[bssid].last_seen = time.time()
-
-        return networks
+        return parsed
 
     def scan(self) -> List[NetworkInfo]:
         """
@@ -173,7 +142,7 @@ class NetworkScanner:
         try:
             result = subprocess.run(
                 ["netsh", "wlan", "show", "networks", "mode=bssid"],
-                capture_output=True, text=True, timeout=3.0,
+                capture_output=True, text=True, timeout=8.0,
             )
         except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
             logger.warning("Network scanner: netsh unavailable (%s)", exc)
@@ -183,54 +152,56 @@ class NetworkScanner:
             logger.warning("netsh returned non-zero: %s", result.stderr)
             return self._tracked_networks
 
-        # Parse this scan
-        new_networks = self._parse_netsh_output(result.stdout)
-
-        # Update state: track appearance count and consecutive strong scans
-        for bssid, net in new_networks.items():
-            if bssid in self._networks:
-                old = self._networks[bssid]
-                net.appearance_count = old.appearance_count + 1
-                if old.consecutive_strong_scans >= self.min_consecutive_scans:
-                    net.consecutive_strong_scans = 0  # reset if we missed a scan
-                elif net.is_strong:
-                    net.consecutive_strong_scans += 1
-            else:
-                net.appearance_count = 1
-                net.consecutive_strong_scans = 1 if net.is_strong else 0
-
-            # Update last_seen
-            net.last_seen = now
-
-        # Carry over networks that disappeared from this scan
-        for bssid, old_net in self._networks.items():
-            if bssid not in new_networks:
-                # Network disappeared, reset its streak
-                self._networks[bssid].consecutive_strong_scans = 0
-            else:
-                new_net = new_networks[bssid]
-                new_net.appearance_count += old_net.appearance_count
-                new_net.consecutive_strong_scans = (
-                    old_net.consecutive_strong_scans +
-                    new_net.consecutive_strong_scans
-                )
-                self._networks[bssid] = new_net
-
-        self._networks = new_networks
         self._last_scan_time = now
+        parsed = self._parse_netsh_output(result.stdout)
 
-        # Determine which networks qualify as "tracked"
-        self._tracked_networks = [
-            net for net in self._networks.values()
-            if net.is_strong and net.consecutive_strong_scans >= self.min_consecutive_scans
-        ]
+        # Single consolidated pass: for every BSSID seen THIS scan, compute
+        # its new state from its OLD state (or fresh, if new) exactly once.
+        # No second loop re-touches these fields -- that double-update is
+        # what caused the old appearance_count/streak inflation bug.
+        updated: dict[str, NetworkInfo] = {}
+        for bssid, (ssid, signal_percent) in parsed.items():
+            is_strong = signal_percent >= self.signal_floor_percent
+            old = self._networks.get(bssid)
+
+            if old is None:
+                appearance_count = 1
+                consecutive_strong_scans = 1 if is_strong else 0
+                first_seen = now
+            else:
+                appearance_count = old.appearance_count + 1
+                consecutive_strong_scans = (
+                    old.consecutive_strong_scans + 1 if is_strong else 0
+                )
+                first_seen = old.first_seen
+
+            updated[bssid] = NetworkInfo(
+                bssid=bssid,
+                ssid=ssid,
+                signal_percent=signal_percent,
+                is_strong=is_strong,
+                appearance_count=appearance_count,
+                consecutive_strong_scans=consecutive_strong_scans,
+                first_seen=first_seen,
+                last_seen=now,
+                tracked=consecutive_strong_scans >= self.min_consecutive_scans,
+            )
+
+        # BSSIDs that were known before but didn't show up this scan: keep
+        # them (so labels/history aren't lost on a transient miss) but reset
+        # their streak, since "stable" means consecutive, not cumulative.
+        for bssid, old in self._networks.items():
+            if bssid not in updated:
+                old.consecutive_strong_scans = 0
+                old.tracked = False
+                updated[bssid] = old
+
+        self._networks = updated
+        self._tracked_networks = [n for n in self._networks.values() if n.tracked]
 
         logger.debug(
-            "Network scan: %d total networks, %d tracked, "
-            "interval=%.1fs",
-            len(self._networks),
-            len(self._tracked_networks),
-            now - self._last_scan_time,
+            "Network scan: %d total networks, %d tracked",
+            len(self._networks), len(self._tracked_networks),
         )
 
         return self._tracked_networks

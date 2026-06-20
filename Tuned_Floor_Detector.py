@@ -31,10 +31,13 @@ class TunedRSSI_Explorer:
         self.active_profile = None
         self._last_ssid_check = 0.0
 
-        # Multi-network scanner (only active if MULTI_NETWORK_MODE)
+        # Multi-network scanner (only active if MULTI_NETWORK_MODE).
+        # signal_floor_percent uses netsh's own 0-100% signal reading
+        # directly -- no invented dBm conversion (Windows doesn't expose
+        # true dBm for networks you're not connected to).
         self.network_scanner = NetworkScanner(
             scan_interval=NETWORK_SCAN_INTERVAL,
-            signal_floor=-70.0,
+            signal_floor_percent=35.0,
             min_consecutive_scans=3,
         ) if MULTI_NETWORK_MODE else None
         self.tracked_networks = []  # List of (bssid, profile) tuples
@@ -64,10 +67,6 @@ class TunedRSSI_Explorer:
         self.info_text = self.ax_info.text(
             0, 1, '', va='top', ha='left', fontsize=8.5, family='monospace'
         )
-
-        # Network breakdown panel header
-        self.ax_network_header = self.ax2.copy()  # Use same axis for now
-        self.ax_network_header.set_visible(False)
 
     # -- SSID / profile switching --------------------------------------------
 
