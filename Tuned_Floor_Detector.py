@@ -5,11 +5,18 @@ import matplotlib.pyplot as plt
 from matplotlib.widgets import RadioButtons
 from v1.src.sensing.rssi_collector import WindowsWifiCollector
 from router_profile import RouterProfileStore, get_current_ssid
+from network_scanner import NetworkScanner
 
 plt.ion()
 
+# Single-network mode settings
 SSID_POLL_INTERVAL = 5.0   # seconds -- SSID doesn't change every sample, no need to shell out constantly
 UNKNOWN_SSID_KEY = "(unknown network)"
+
+# Multi-network mode settings
+MULTI_NETWORK_MODE = False  # Set to True to enable multi-network sensing
+NETWORK_SCAN_INTERVAL = 2.0  # seconds between full network scans
+MIN_TRACKED_NETWORKS = 2  # minimum networks needed for combined verdict
 
 
 class TunedRSSI_Explorer:
@@ -24,9 +31,23 @@ class TunedRSSI_Explorer:
         self.active_profile = None
         self._last_ssid_check = 0.0
 
+        # Multi-network scanner (only active if MULTI_NETWORK_MODE)
+        self.network_scanner = NetworkScanner(
+            scan_interval=NETWORK_SCAN_INTERVAL,
+            signal_floor=-70.0,
+            min_consecutive_scans=3,
+        ) if MULTI_NETWORK_MODE else None
+        self.tracked_networks = []  # List of (bssid, profile) tuples
+        self._pending_label = None  # Pending label for new network
+
         self.fig, (self.ax1, self.ax2) = plt.subplots(2, 1, figsize=(11, 8))
-        # Leave room on the right for the router-profile selector panel.
-        self.fig.subplots_adjust(right=0.78)
+        # More room on the right for both router selector and network breakdown
+        if MULTI_NETWORK_MODE:
+            self.fig.subplots_adjust(right=0.90)
+            # Add third axis for network breakdown
+            self.ax3 = self.fig.add_axes([0.93, 0.15, 0.05, 0.7])
+        else:
+            self.fig.subplots_adjust(right=0.78)
 
         # Side panel: lets you browse other learned router profiles without
         # affecting which one is actively learning (that's always whichever
@@ -43,6 +64,10 @@ class TunedRSSI_Explorer:
         self.info_text = self.ax_info.text(
             0, 1, '', va='top', ha='left', fontsize=8.5, family='monospace'
         )
+
+        # Network breakdown panel header
+        self.ax_network_header = self.ax2.copy()  # Use same axis for now
+        self.ax_network_header.set_visible(False)
 
     # -- SSID / profile switching --------------------------------------------
 
@@ -110,14 +135,59 @@ class TunedRSSI_Explorer:
 
     # -- info panel text -------------------------------------------------
 
-    def _update_info_text(self, current_threshold):
+    def _compute_combined_score(self) -> float:
+        """
+        Compute the combined motion score from all tracked networks.
+        Uses mean of individual scores.
+        """
+        if not self.tracked_networks:
+            return 0.0
+        return np.mean([profile.mean_score for _, profile in self.tracked_networks])
+
+    def _compute_combined_threshold(self) -> float:
+        """
+        Compute the combined threshold from all tracked networks.
+        Uses the minimum threshold (most sensitive network).
+        """
+        if not self.tracked_networks:
+            return 0.6  # High threshold if no networks
+        return min([profile.threshold for _, profile in self.tracked_networks])
+
+    def _update_info_text(self, current_threshold: float, multi_mode: bool = False):
+        """
+        Update the info text panel.
+        """
         viewed = self.store.get(self.viewing_ssid) if self.viewing_ssid else None
-        lines = [
-            f"Active: {self.active_ssid or '...'}",
-            f"Threshold: {current_threshold:.3f}",
-            "",
-            f"Viewing: {self.viewing_ssid or '-'}",
-        ]
+        lines = []
+
+        if MULTI_NETWORK_MODE:
+            # Multi-network mode info
+            lines.append("=== Multi-Network Mode ===")
+            lines.append(f"Combined Score: {self._compute_combined_score():.3f}")
+            lines.append(f"Combined Threshold: {self._compute_combined_threshold():.3f}")
+            lines.append(f"Tracked Networks: {len(self.tracked_networks)}")
+            lines.append("")
+            lines.append("Active: " + (self.active_ssid or '...'))
+            lines.append(f"Threshold: {current_threshold:.3f}")
+            lines.append("")
+            lines.append("Network Breakdown:")
+
+            # Add per-network info
+            for bssid, profile in self.tracked_networks:
+                net_status = "TRACKED" if (bssid, profile) in self.tracked_networks else "LEARNING"
+                lines.append(f"  {profile.ssid or '(hidden)'} "
+                             f"[{profile.label or '(unknown)'}] "
+                             f"Score: {profile.mean_score:.3f}/thresh: {profile.threshold:.3f} "
+                             f"{net_status}")
+        else:
+            # Single-network mode info
+            lines = [
+                f"Active: {self.active_ssid or '...'}",
+                f"Threshold: {current_threshold:.3f}",
+                "",
+                f"Viewing: {self.viewing_ssid or '-'}",
+            ]
+
         if viewed:
             lines += [
                 f"  samples:   {viewed.sample_count}",
@@ -127,6 +197,7 @@ class TunedRSSI_Explorer:
             ]
         else:
             lines.append("  (no data yet)")
+
         self.info_text.set_text("\n".join(lines))
 
     def run(self):

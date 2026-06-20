@@ -1,16 +1,29 @@
 {
   "TheMatrix": {
     "ssid": "TheMatrix",
-    "mean_score": 0.3549948147279718,
-    "std_score": 0.10074168866464796,
-    "sample_count": 497,
-    "last_updated": 1781957399.5305326
+    "bssid": "",
+    "label": "",
+    "mean_score": 0.2248786732818224,
+    "std_score": 0.12221025798738004,
+    "sample_count": 1999,
+    "last_updated": 1781961308.9888365
   },
   "Marentzius": {
     "ssid": "Marentzius",
+    "bssid": "",
+    "label": "",
     "mean_score": 0.21188641552222157,
     "std_score": 0.10158310276887954,
     "sample_count": 209,
     "last_updated": 1781957281.6754184
+  },
+  "40b076235450": {
+    "ssid": "TheMatrix",
+    "bssid": "40b076235450",
+    "label": "bedroom",
+    "mean_score": 0.1,
+    "std_score": 0.06,
+    "sample_count": 0,
+    "last_updated": 1781969543.8536663
   }
 }
